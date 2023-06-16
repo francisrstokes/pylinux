@@ -1,0 +1,94 @@
+diff --git a/Makefile b/Makefile
+index 730dbd9..03c3f37 100644
+--- a/Makefile
++++ b/Makefile
+@@ -271,9 +271,9 @@ endif
+ ifndef PLATFORM_RISCV_ISA
+   ifneq ($(PLATFORM_RISCV_TOOLCHAIN_DEFAULT), 1)
+     ifeq ($(CC_SUPPORT_ZICSR_ZIFENCEI), y)
+-      PLATFORM_RISCV_ISA = rv$(PLATFORM_RISCV_XLEN)imafdc_zicsr_zifencei
++      PLATFORM_RISCV_ISA = rv$(PLATFORM_RISCV_XLEN)imafd_zicsr_zifencei
+     else
+-      PLATFORM_RISCV_ISA = rv$(PLATFORM_RISCV_XLEN)imafdc
++      PLATFORM_RISCV_ISA = rv$(PLATFORM_RISCV_XLEN)imafd
+     endif
+   else
+     PLATFORM_RISCV_ISA = $(OPENSBI_CC_ISA)
+@@ -331,12 +331,17 @@ GENFLAGS	+=	$(libsbiutils-genflags-y)
+ GENFLAGS	+=	$(platform-genflags-y)
+ GENFLAGS	+=	$(firmware-genflags-y)
+ 
+-CFLAGS		=	-g -Wall -Werror -ffreestanding -nostdlib -fno-stack-protector -fno-strict-aliasing
++CFLAGS		=	-ggdb -Wall -ffreestanding -nostdlib -fno-stack-protector -fno-strict-aliasing
++# CFLAGS		=	-g -Wall -Werror -ffreestanding -nostdlib -fno-stack-protector -fno-strict-aliasing
++
+ ifneq ($(DEBUG),)
++$(info Using O0)
+ CFLAGS		+=	-O0
+ else
++$(info Using O2)
+ CFLAGS		+=	-O2
+ endif
++
+ CFLAGS		+=	-fno-omit-frame-pointer -fno-optimize-sibling-calls -mstrict-align
+ # enable -m(no-)save-restore option by CC_SUPPORT_SAVE_RESTORE
+ ifeq ($(CC_SUPPORT_SAVE_RESTORE),y)
+diff --git a/platform/generic/objects.mk b/platform/generic/objects.mk
+index 136853e..53c89eb 100644
+--- a/platform/generic/objects.mk
++++ b/platform/generic/objects.mk
+@@ -22,7 +22,7 @@ platform-objs-y += platform.o
+ platform-objs-y += platform_override_modules.o
+ 
+ # Blobs to build
+-FW_TEXT_START=0x80000000
++FW_TEXT_START=0x20000000
+ FW_DYNAMIC=y
+ FW_JUMP=y
+ ifeq ($(PLATFORM_RISCV_XLEN), 32)
+diff --git a/platform/generic/platform.c b/platform/generic/platform.c
+index 86811e6..272eea3 100644
+--- a/platform/generic/platform.c
++++ b/platform/generic/platform.c
+@@ -26,6 +26,15 @@
+ #include <sbi_utils/reset/fdt_reset.h>
+ #include <sbi_utils/serial/semihosting.h>
+ 
++#include <sbi_utils/serial/uart8250.h>
++
++#define UART_ADDR						0x10000000
++#define UART_FREQ						50000000
++#define UART_BAUDRATE				115200
++#define UART_REG_SHIFT			2
++#define UART_REG_WIDTH			4
++#define UART_REG_OFFSET			0
++
+ /* List of platform override modules generated at compile time */
+ extern const struct platform_override *platform_override_modules[];
+ extern unsigned long platform_override_modules_size;
+@@ -33,6 +42,16 @@ extern unsigned long platform_override_modules_size;
+ static const struct platform_override *generic_plat = NULL;
+ static const struct fdt_match *generic_plat_match = NULL;
+ 
++static int moria_console_init(void)
++{
++	return uart8250_init(UART_ADDR,
++			     UART_FREQ,
++			     UART_BAUDRATE,
++			     UART_REG_SHIFT,
++			     UART_REG_WIDTH,
++			     UART_REG_OFFSET);
++}
++
+ static void fw_platform_lookup_special(void *fdt, int root_offset)
+ {
+ 	const struct platform_override *plat;
+@@ -291,7 +310,7 @@ const struct sbi_platform_operations platform_ops = {
+ 	.final_exit		= generic_final_exit,
+ 	.extensions_init	= generic_extensions_init,
+ 	.domains_init		= generic_domains_init,
+-	.console_init		= generic_console_init,
++	.console_init		= moria_console_init,
+ 	.irqchip_init		= fdt_irqchip_init,
+ 	.irqchip_exit		= fdt_irqchip_exit,
+ 	.ipi_init		= fdt_ipi_init,
