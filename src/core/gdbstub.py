@@ -94,11 +94,24 @@ class GDBStub:
         NonStop     = 2
         ContinueTo  = 3
 
-    def __init__(self, rv: RISCV):
+    def __init__(self, rv: RISCV, debug_log_path=None):
         self.breakpoints = []
         self.state = self.State.Stop
         self.rv = rv
         self.continue_addr = 0
+
+        if debug_log_path is not None:
+            self.log_file = open(debug_log_path, "w")
+        else:
+            self.log_file = None
+
+    def step(self):
+        if self.log_file is not None:
+            self.log_file.write(f"{self.rv.state.pc:08x}\n")
+        self.rv.fetch_decode_execute()
+
+    def add_breakpoint(self, addr: int):
+        self.breakpoints.append(addr)
 
     def read_registers(self):
         regs = self.rv.state.regs + [self.rv.state.pc] #+ [self.rv.csr_read(csr) for csr in csrs]
@@ -148,7 +161,7 @@ class GDBStub:
         addr = int(addr, 16)
 
         if addr not in self.breakpoints:
-            self.breakpoints.append(addr)
+            self.add_breakpoint(addr)
 
     def remove_breakpoint(self, command: str):
         command = command[3:] # Chop off the "z0," part
@@ -164,7 +177,7 @@ class GDBStub:
             self.state = self.State.NonStop
             return ""
         if command.startswith("s"):
-            self.rv.fetch_decode_execute()
+            self.step()
             self.state = self.State.Stop
             return "T05"
         else:
@@ -230,7 +243,7 @@ class GDBStub:
                         # Run a cycle
                         # print(f"{cycles}: {self.rv.state.pc:08x}")
                         cycles += 1
-                        self.rv.fetch_decode_execute()
+                        self.step()
 
                         if self.rv.gdb_breakpoint_hit:
                             self.send_packet(conn, "T05")
