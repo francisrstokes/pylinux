@@ -3,8 +3,6 @@ from enum import IntEnum
 import struct
 import sys
 
-from asm import dump_source_and_dis
-
 # TODO:
 #   - Atomics tests
 #   - More extensive branching tests? e.g. Loops
@@ -376,7 +374,7 @@ class RISCV:
     console: TextIO
     uart_rx_buffer: List[int]
 
-    def __init__(self, ram_size: int, pc = 0x80000000, console = sys.stdout, elf_path = None, gdb_mode = False):
+    def __init__(self, ram_size: int, pc = 0x80000000, console = sys.stdout, elf_path = None, gdb_mode = False, on_breakpoint_hit=None):
         rom_size = 1024 * 1024 # 1MiB
         self.state = RVState(pc)
         self.mem = bytearray([0] * ram_size)
@@ -387,6 +385,7 @@ class RISCV:
         self.elf_path = elf_path
         self.gdb_mode = gdb_mode
         self.gdb_breakpoint_hit = False
+        self.on_breakpoint_hit = on_breakpoint_hit
 
         self.step_mode = False
 
@@ -922,8 +921,8 @@ class RISCV:
 
     def fetch_decode_execute(self):
         if self.step_mode or self.state.pc in self.breakpoints:
-            self.state.dump()
-            # self.dump_source_line()
+            if self.on_breakpoint_hit:
+                self.on_breakpoint_hit()
             breakpoint()
 
         try:

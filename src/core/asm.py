@@ -9,15 +9,20 @@ RV_PREFIX="/opt/riscv32i/bin/riscv32-unknown-elf-"
 def run_command(command: str):
     subprocess.call(command.split(" "))
 
-def run_command_with_output(command: str):
+def run_command_with_output(command: str, decode=None, strip=False):
     proc = subprocess.Popen(command.split(" "), stdout=subprocess.PIPE)
     output = proc.stdout.read()
     proc.communicate()
+
+    if decode is not None:
+        output = output.decode(decode)
+    if strip:
+        output = output.strip()
     return output
 
 def parse_symbols(elf_filename: str):
     symbol_re = r"([0-9a-fA-F]+)\s(?:T|t)\s(.+)"
-    raw_symbols = run_command_with_output(f"{RV_PREFIX}nm {elf_filename}").decode("utf-8").splitlines()
+    raw_symbols = run_command_with_output(f"{RV_PREFIX}nm {elf_filename}", decode="utf-8").splitlines()
     symbols = {}
     for raw_line in raw_symbols:
         result = re.search(symbol_re, raw_line)
@@ -34,8 +39,11 @@ def parse_instructions(raw_objdump: str):
     def is_blank_line(line: str):
         return line.strip() == ""
 
+    def is_dotdotdot_line(line: str):
+        return line.strip() == "..."
+
     def read_instruction_data(line: str):
-        instr_line_re = r"^([0-9a-fA-F]+):\s+[0-9a-fA-F]+\s+(.+)$"
+        instr_line_re = r"^([0-9a-fA-F]+):\s+(?:[0-9a-fA-F]+)?\s+(.+)$"
         m = re.match(instr_line_re, line)
         if m is not None:
             return m.group(1, 2)
@@ -43,11 +51,28 @@ def parse_instructions(raw_objdump: str):
 
     lines = raw_objdump.split("Disassembly of section .text:")[1].strip().splitlines()
     instructions = {}
-    for line in lines:
-        if not is_symbol_line(line) and not is_blank_line(line):
-            (addr, instr) = read_instruction_data(line)
-            instructions[int(addr, 16)] = instr
+    try:
+        for line in lines:
+            if not is_symbol_line(line) and not is_blank_line(line) and not is_dotdotdot_line(line):
+                (addr, instr) = read_instruction_data(line)
+                instructions[int(addr, 16)] = instr
+    except Exception as e:
+        print(e)
+        print(lines)
     return instructions
+
+def addr2line(elf_path: str, pc: int):
+    file_line = run_command_with_output(f"{RV_PREFIX}addr2line -e {elf_path} {pc:08x}", decode="utf-8", strip=True)
+    (file, line) = file_line.split(":")
+    with open(file, "r") as f:
+        text = f.read().splitlines()
+    line_text = text[int(line)-1]
+    return (file_line, line_text)
+
+def dump_source_and_dis(elf_path: str, pc: int):
+    output = run_command_with_output(f"{RV_PREFIX}objdump -l --source -d {elf_path} --start-address=0x{pc:08x} --stop-address=0x{pc+4:08x}", decode="utf-8", strip=True)
+    output = output.split("Disassembly of section .text:")[1].strip()
+    return output
 
 preamble = ".section .text\n.global _start\n_start:"
 linker_script = os.path.dirname(os.path.abspath(__file__)) + f"/../test/link.ld"
