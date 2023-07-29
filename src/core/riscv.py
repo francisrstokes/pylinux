@@ -147,13 +147,6 @@ Memory map
 +----------------+------------------+
 """
 
-def bit_slice(value: int, from_bit: int, to_bit: int):
-    width = from_bit - to_bit + 1
-    return ((value >> to_bit) & ((1 << width) - 1))
-
-def bit(value: int, bit_index: int):
-    return (value >> bit_index) & 1
-
 def sign_extend32(bits: int, value: int):
     if value & (1 << (bits - 1)):
         return ((0xffffffff >> bits) << bits) | value
@@ -459,7 +452,7 @@ class RISCV:
     def mm_handle_clint_read(self, address: int, word_size: int):
         base_register_addr = (address & 0xffffff00)
         if base_register_addr == CLINT_MSIP:
-            return bit(self.state.mip, IP_MSIP)
+            return ((self.state.mip >> IP_MSIP) & 1)
         elif base_register_addr == (CLINT_MTIME_LOW & 0xffffff00):
             offset = address - CLINT_MTIME_LOW
             return read_from_u64_offset(self.state.cycle, offset, word_size)
@@ -512,20 +505,20 @@ class RISCV:
             # If MPP is set to supervisor, and MPRV is enabled, then reads and writes are also translated
             # in M-Mode
             if not (bool(self.state.satp & 0x80000000) and
-                    bit(self.state.mstatus, 17) == 1 and
-                    bit_slice(self.state.mstatus, 12, 11) == 1):
+                    ((self.state.mstatus >> 17) & 1) == 1 and
+                    ((self.state.mstatus >> 11) & 0x3) == 1):
                 return address
         elif self.state.current_mode == PrivMode.Supervisor and not bool(self.state.satp & 0x80000000):
             return address
 
-        page_table_addr = bit_slice(self.state.satp, 21, 0) * PAGE_SIZE
+        page_table_addr = ((self.state.satp >> 0) & 0x3fffff) * PAGE_SIZE
         translation_level = 1
 
         vpns = [
-            bit_slice(address, 21, 12),
-            bit_slice(address, 31, 22)
+            ((address >> 12) & 0x3ff),
+            ((address >> 22) & 0x3ff)
         ]
-        page_offset = bit_slice(address, 11, 0)
+        page_offset = ((address >> 0) & 0xfff)
 
         while True:
             if translation_level < 0:
@@ -539,31 +532,31 @@ class RISCV:
             page_table_entry = struct.unpack_from("<I", self.mem, page_table_entry_address - RAM_START)[0]
 
             # Valid PTE?
-            if bit(page_table_entry, PTE_V) == 0:
+            if ((page_table_entry >> PTE_V) & 1) == 0:
                 raise self.mmu_get_trap_value(address, access_ctx)
 
             # Sensible permissions?
-            if bit(page_table_entry, PTE_R) == 0 and bit(page_table_entry, PTE_W) == 1:
+            if ((page_table_entry >> PTE_R) & 1) == 0 and ((page_table_entry >> PTE_W) & 1) == 1:
                 raise self.mmu_get_trap_value(address, access_ctx)
 
             # Is this PTE a parent node?
-            if bit(page_table_entry, PTE_R) == 0 and bit(page_table_entry, PTE_X) == 0:
-                page_table_addr = bit_slice(page_table_entry, 31, 10) * PAGE_SIZE
+            if ((page_table_entry >> PTE_R) & 1) == 0 and ((page_table_entry >> PTE_X) & 1) == 0:
+                page_table_addr = ((page_table_entry >> 10) & 0x3fffff) * PAGE_SIZE
                 translation_level -= 1
                 continue
 
             # Otherwise this must be a valid entry, check that the current context has permission
             # to access this page
-            sum_bit = bit(self.state.sstatus, 18)
-            user_bit = bit(page_table_entry, PTE_U)
+            sum_bit = ((self.state.sstatus >> 18) & 1)
+            user_bit = ((page_table_entry >> PTE_U) & 1)
 
             has_privilege =                  (self.state.current_mode == PrivMode.Machine)
             has_privilege = has_privilege or (self.state.current_mode == PrivMode.Supervisor and (not user_bit or sum_bit))
             has_privilege = has_privilege or (self.state.current_mode == PrivMode.User and user_bit)
 
-            access_matches =                   (access_ctx == MemoryAccessCtx.Fetch and bit(page_table_entry, PTE_X))
-            access_matches = access_matches or (access_ctx == MemoryAccessCtx.Read and bit(page_table_entry, PTE_R))
-            access_matches = access_matches or (access_ctx == MemoryAccessCtx.Write and bit(page_table_entry, PTE_W))
+            access_matches =                   (access_ctx == MemoryAccessCtx.Fetch and ((page_table_entry >> PTE_X) & 1))
+            access_matches = access_matches or (access_ctx == MemoryAccessCtx.Read and ((page_table_entry >> PTE_R) & 1))
+            access_matches = access_matches or (access_ctx == MemoryAccessCtx.Write and ((page_table_entry >> PTE_W) & 1))
 
             if not (has_privilege and access_matches):
                 raise self.mmu_get_trap_value(address, access_ctx)
@@ -577,8 +570,8 @@ class RISCV:
         is_superpage = translation_level == 1
 
         physical_address = page_offset
-        physical_address |= vpns[0] << 12 if is_superpage else bit_slice(page_table_entry, 19, 10) << 12
-        physical_address |= bit_slice(page_table_entry, 31, 20) << 22
+        physical_address |= vpns[0] << 12 if is_superpage else ((page_table_entry >> 10) & 0x3ff) << 12
+        physical_address |= ((page_table_entry >> 20) & 0xfff) << 22
 
         return physical_address
 
@@ -717,7 +710,7 @@ class RISCV:
         return instruction
 
     def csr_read(self, csr: int):
-        permission_bits = bit_slice(csr, 9, 8)
+        permission_bits = ((csr >> 8) & 0x3)
         if permission_bits == 3 and not self.state.current_mode == PrivMode.Machine:
             raise RVTrap(TrapCause.IllegalInstruction)
         elif permission_bits == 2 and not self.state.current_mode in [PrivMode.Machine, PrivMode.Supervisor]:
@@ -783,7 +776,7 @@ class RISCV:
             raise RVTrap(TrapCause.IllegalInstruction, csr)
 
     def csr_write(self, csr: int, value: int):
-        permission_bits = bit_slice(csr, 9, 8)
+        permission_bits = ((csr >> 8) & 0x3)
         if permission_bits == 3 and not self.state.current_mode == PrivMode.Machine:
             raise RVTrap(TrapCause.IllegalInstruction)
         elif permission_bits == 2 and not self.state.current_mode in [PrivMode.Machine, PrivMode.Supervisor]:
@@ -843,14 +836,14 @@ class RISCV:
 
         if is_interrupt:
             ie = self.state.mie if effective_mode == PrivMode.Machine else self.state.sie
-            mie = bit(status, STATUS_MIE)
-            sie = bit(status, STATUS_SIE)
-            msie = bit(ie, IE_MSIE)
-            ssie = bit(ie, IE_SSIE)
-            mtie = bit(ie, IE_MTIE)
-            stie = bit(ie, IE_STIE)
-            meie = bit(ie, IE_MEIE)
-            seie = bit(ie, IE_SSIE)
+            mie = ((status >> STATUS_MIE) & 1)
+            sie = ((status >> STATUS_SIE) & 1)
+            msie = ((ie >> IE_MSIE) & 1)
+            ssie = ((ie >> IE_SSIE) & 1)
+            mtie = ((ie >> IE_MTIE) & 1)
+            stie = ((ie >> IE_STIE) & 1)
+            meie = ((ie >> IE_MEIE) & 1)
+            seie = ((ie >> IE_SSIE) & 1)
 
             if effective_mode == PrivMode.Machine and mie == 0:
                 return False
@@ -878,7 +871,7 @@ class RISCV:
             self.state.mepc = self.state.pc - 4
             self.state.mtval = trap.tval
 
-            mie = bit(self.state.mstatus, STATUS_MIE)
+            mie = ((self.state.mstatus >> STATUS_MIE) & 1)
 
             # Clear the bits we need to update in the register
             self.state.mstatus &= 0xffffe766
@@ -889,7 +882,7 @@ class RISCV:
             self.state.sepc = self.state.pc - 4
             self.state.stval = trap.tval
 
-            sie = bit(self.state.mstatus, STATUS_SIE)
+            sie = ((self.state.mstatus >> STATUS_SIE) & 1)
 
             # Clear the bits we need to update in the register
             self.state.sstatus &= 0xfffffecc
@@ -905,11 +898,11 @@ class RISCV:
             self.state.mip |= (1 << IP_MTIP)
 
         # Check for enabled and pending interrupts
-        if bit(self.state.mstatus, STATUS_MIE):
-            if bit(self.state.mie, TrapCause.MachineTimerInterrupt & 0xffff) and bit(self.state.mip, IP_MTIP):
+        if ((self.state.mstatus >> STATUS_MIE) & 1):
+            if ((self.state.mie >> (TrapCause.MachineTimerInterrupt & 0xffff)) & 1) and ((self.state.mip >> IP_MTIP) & 1):
                 self.state.mip &= (1 << IP_MTIP) ^ 0xffffffff
                 raise RVTrap(TrapCause.MachineTimerInterrupt)
-            if bit(self.state.mie, TrapCause.MachineSoftwareInterrupt & 0xffff) and bit(self.state.mip, IP_MSIP):
+            if ((self.state.mie >> (TrapCause.MachineSoftwareInterrupt & 0xffff)) & 1) and ((self.state.mip >> IP_MSIP) & 1):
                 self.state.mip &= (1 << IP_MSIP) ^ 0xffffffff
                 raise RVTrap(TrapCause.MachineSoftwareInterrupt)
 
@@ -926,11 +919,11 @@ class RISCV:
             if not self.state.wait_for_interrupt:
                 instruction = self.fetch()
 
-                opcode = bit_slice(instruction, 6, 0)
-                rd = bit_slice(instruction, 11, 7)
-                funct3 = bit_slice(instruction, 14, 12)
-                rs1 = bit_slice(instruction, 19, 15)
-                rs2 = bit_slice(instruction, 24, 20)
+                opcode = ((instruction >> 0) & 0x7f)
+                rd = ((instruction >> 7) & 0x1f)
+                funct3 = ((instruction >> 12) & 0x7)
+                rs1 = ((instruction >> 15) & 0x1f)
+                rs2 = ((instruction >> 20) & 0x1f)
 
                 if instruction == 0x10500073:
                     # WFI
@@ -938,7 +931,7 @@ class RISCV:
                 elif instruction == 0x30200073:
                     # MRET
                     mpp = (self.state.mstatus >> STATUS_MPP) & 3
-                    mpie = bit(self.state.mstatus, STATUS_MPIE)
+                    mpie = ((self.state.mstatus >> STATUS_MPIE) & 1)
 
                     self.state.mstatus &= 0xffffe766
                     self.state.mstatus |= mpie << STATUS_MIE
@@ -949,7 +942,7 @@ class RISCV:
                 elif instruction == 0x10200073:
                     # SRET
                     spp = (self.state.sstatus >> STATUS_SPP)
-                    spie = bit(self.state.sstatus, STATUS_SPIE)
+                    spie = ((self.state.sstatus >> STATUS_SPIE) & 1)
 
                     self.state.sstatus &= 0xfffffedd
                     self.state.sstatus |= spie << STATUS_SIE
@@ -961,33 +954,33 @@ class RISCV:
                     # URET
                     raise RVTrap(TrapCause.IllegalInstruction)
                 elif opcode == OPCODE_LUI:
-                    imm = bit_slice(instruction, 31, 12)
+                    imm = ((instruction >> 12) & 0xfffff)
                     if rd != 0:
                         self.state.regs[rd] = imm << 12
                 elif opcode == OPCODE_AUIPC:
-                    imm = bit_slice(instruction, 31, 12)
+                    imm = ((instruction >> 12) & 0xfffff)
                     if rd != 0:
                         self.state.regs[rd] = constrain32(self.state.pc + (imm << 12) - 4)
                 elif opcode == OPCODE_JAL:
                     imm = sign_extend32(21,
-                                        (bit(instruction, 31)           << 20) |
-                                        (bit_slice(instruction, 19, 12) << 12) |
-                                        (bit(instruction, 20)           << 11) |
-                                        (bit_slice(instruction, 30, 21) << 1))
+                                        (((instruction >> 31) & 1)           << 20) |
+                                        (((instruction >> 12) & 0xff) << 12) |
+                                        (((instruction >> 20) & 1)           << 11) |
+                                        (((instruction >> 21) & 0x3ff) << 1))
                     rd_value = self.state.pc if rd != 0 else self.state.regs[rd]
                     self.state.pc = constrain32(self.state.pc + imm - 4)
                     self.state.regs[rd] = rd_value
                 elif opcode == OPCODE_JALR and funct3 == 0b000:
-                    imm = sign_extend32(12, bit_slice(instruction, 31, 20))
+                    imm = sign_extend32(12, ((instruction >> 20) & 0xfff))
 
                     rd_value = self.state.pc if rd != 0 else self.state.regs[rd]
                     self.state.pc = (self.state.regs[rs1] + imm) & 0xfffffffe
                     self.state.regs[rd] = rd_value
                 elif opcode == OPCODE_BRANCH:
-                    imm = sign_extend32(13, ((bit(instruction, 31)          << 12) |
-                                            (bit(instruction, 7)            << 11) |
-                                            (bit_slice(instruction, 30, 25) << 5) |
-                                            (bit_slice(instruction, 11, 8)  << 1)
+                    imm = sign_extend32(13, ((((instruction >> 31) & 1)          << 12) |
+                                            (((instruction >> 7) & 1)            << 11) |
+                                            (((instruction >> 25) & 0x3f) << 5) |
+                                            (((instruction >> 8) & 0xf)  << 1)
                                             ))
 
                     take_branch =                (funct3 == BRANCH_BEQ and self.state.regs[rs1] == self.state.regs[rs2])
@@ -1002,7 +995,7 @@ class RISCV:
                     if take_branch:
                         self.state.pc = constrain32(self.state.pc + imm - 4)
                 elif opcode == OPCODE_LOAD:
-                    imm = sign_extend32(12, bit_slice(instruction, 31, 20))
+                    imm = sign_extend32(12, ((instruction >> 20) & 0xfff))
                     address = constrain32(self.state.regs[rs1] + imm)
 
                     should_sign_extend = (funct3 & 0b100) == 0
@@ -1022,7 +1015,7 @@ class RISCV:
                     if rd != 0:
                         self.state.regs[rd] = loaded_value
                 elif opcode == OPCODE_STORE:
-                    imm = sign_extend32(12, (bit_slice(instruction, 31, 25) << 5) | bit_slice(instruction, 11, 7))
+                    imm = sign_extend32(12, (((instruction >> 25) & 0x7f) << 5) | ((instruction >> 7) & 0x1f))
                     address = constrain32(self.state.regs[rs1] + imm)
 
                     if (funct3 & 0b011) == MEMSIZE_B:
@@ -1032,9 +1025,9 @@ class RISCV:
                     elif (funct3 & 0b011) == MEMSIZE_W:
                         self.memory_write32(address, self.state.regs[rs2])
                 elif opcode == OPCODE_ALU_IMM:
-                    imm = sign_extend32(12, bit_slice(instruction, 31, 20))
+                    imm = sign_extend32(12, ((instruction >> 20) & 0xfff))
                     shamt = rs2
-                    is_arithmetic = bit(instruction, 30)
+                    is_arithmetic = ((instruction >> 30) & 1)
 
                     if rd != 0:
                         if funct3 == ALU_ADD:
@@ -1058,8 +1051,8 @@ class RISCV:
                         else:
                             raise RVTrap(TrapCause.IllegalInstruction)
                 elif opcode == OPCODE_ALU_REG:
-                    is_arithmetic = bit(instruction, 30)
-                    is_m_ext = bit_slice(instruction, 31, 25) == M_EXT_FUNCT7
+                    is_arithmetic = ((instruction >> 30) & 1)
+                    is_m_ext = ((instruction >> 25) & 0x7f) == M_EXT_FUNCT7
 
                     if rd != 0:
                         if is_m_ext:
@@ -1114,7 +1107,7 @@ class RISCV:
                 elif opcode == OPCODE_FENCE:
                     # FENCE / FENCE.I
                     pass
-                elif opcode == OPCODE_SYSTEM and bit_slice(instruction, 31, 7) == 0:
+                elif opcode == OPCODE_SYSTEM and ((instruction >> 7) & 0x1ffffff) == 0:
                     # ECALL
                     if self.state.current_mode == PrivMode.Machine:
                         raise RVTrap(TrapCause.EnvironmentCallFromMMode)
@@ -1122,13 +1115,13 @@ class RISCV:
                         raise RVTrap(TrapCause.EnvironmentCallFromSMode)
                     else:
                         raise RVTrap(TrapCause.EnvironmentCallFromUMode)
-                elif opcode == OPCODE_SYSTEM and bit_slice(instruction, 31, 25) == 0x09 and bit_slice(instruction, 14, 7) == 0:
+                elif opcode == OPCODE_SYSTEM and ((instruction >> 25) & 0x7f) == 0x09 and ((instruction >> 7) & 0xff) == 0:
                     # SFENCE.VMA
                     # No need to do anything here, as the emulator does not have any kind of TLB or other
                     # cache related to page tables. That might change in the future if performance is abismal, and
                     # the complexity of adding it is within the accepted parameters
                     pass
-                elif opcode == OPCODE_SYSTEM and bit_slice(instruction, 31, 7) == 0x2000:
+                elif opcode == OPCODE_SYSTEM and ((instruction >> 7) & 0x1ffffff) == 0x2000:
                     if not self.gdb_mode:
                         raise RVTrap(TrapCause.Breakpoint)
                     else:
@@ -1136,7 +1129,7 @@ class RISCV:
                         # GDB will rewrite the current instruction
                         # self.state.pc -= 4
                 elif opcode == OPCODE_SYSTEM:
-                    csr = bit_slice(instruction, 31, 20)
+                    csr = ((instruction >> 20) & 0xfff)
                     in_value = rs1 if (funct3 & 0b100) else self.state.regs[rs1]
 
                     # Always perform the read + side effects
@@ -1154,7 +1147,7 @@ class RISCV:
                         if in_value != 0:
                             self.csr_write(csr, self.csr_read(csr) & (in_value ^ 0xffffffff))
                 elif opcode == OPCODE_A_EXT and funct3 == 0b010:
-                    funct5 = bit_slice(instruction, 31, 27)
+                    funct5 = ((instruction >> 27) & 0x1f)
                     word = self.memory_read32(self.state.regs[rs1])
                     do_writeback = True
                     writeback_value = word
