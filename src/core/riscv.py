@@ -387,6 +387,8 @@ class RISCV:
         self.gdb_breakpoint_hit = False
         self.on_breakpoint_hit = on_breakpoint_hit
 
+        self.pretranslated_pc = 0
+
         self.step_mode = False
 
     def dump_mem(self, address: int, size: int):
@@ -576,7 +578,7 @@ class RISCV:
 
         physical_address = page_offset
         physical_address |= vpns[0] << 12 if is_superpage else bit_slice(page_table_entry, 19, 10) << 12
-        physical_address |= bit_slice(page_table_entry, 31, 20) << 20
+        physical_address |= bit_slice(page_table_entry, 31, 20) << 22
 
         return physical_address
 
@@ -647,6 +649,7 @@ class RISCV:
 
     def memory_read32(self, address: int, is_fetch = False) -> int:
         translated_address = self.mmu_translate_address(address, MemoryAccessCtx.Fetch if is_fetch else  MemoryAccessCtx.Read)
+        self.pretranslated_pc = translated_address
 
         if self.mm_address_in_uart_space(translated_address):
             return self.mm_handle_u8250_read(translated_address)
@@ -777,7 +780,6 @@ class RISCV:
         elif csr in [0xf12, 0xf13]:
             return 0                 # marchid, mimpid
         else:
-            # print(f"csr: {csr:03X}")
             raise RVTrap(TrapCause.IllegalInstruction, csr)
 
     def csr_write(self, csr: int, value: int):
@@ -787,16 +789,7 @@ class RISCV:
         elif permission_bits == 2 and not self.state.current_mode in [PrivMode.Machine, PrivMode.Supervisor]:
             raise RVTrap(TrapCause.IllegalInstruction)
 
-        read_only_csrs = [
-            0xf14, 0xb00, 0xc00, 0xc01,
-            0xb80, 0xc80, 0xc81, 0xb02,
-            0xc02, 0xb82, 0xc82, 0xf11,
-            0x301
-        ]
-
-        if csr in read_only_csrs:
-            pass
-        elif csr == 0x340:
+        if csr == 0x340:
             self.state.mscratch = value
         elif csr == 0x302:
             self.state.medeleg = value
@@ -881,7 +874,8 @@ class RISCV:
 
         if not delegate_to_supervisor:
             self.state.mcause = trap.cause
-            self.state.mepc = self.state.pc # TODO: Check if this needs to just be pc for an exception
+            # Note: This is -4 because pc is auto-incremented when fetching
+            self.state.mepc = self.state.pc - 4
             self.state.mtval = trap.tval
 
             mie = bit(self.state.mstatus, STATUS_MIE)
@@ -892,7 +886,7 @@ class RISCV:
             self.state.mstatus |= self.state.current_mode << STATUS_MPP
         else:
             self.state.scause = trap.cause
-            self.state.sepc = self.state.pc
+            self.state.sepc = self.state.pc - 4
             self.state.stval = trap.tval
 
             sie = bit(self.state.mstatus, STATUS_SIE)
@@ -1121,6 +1115,7 @@ class RISCV:
                     # FENCE / FENCE.I
                     pass
                 elif opcode == OPCODE_SYSTEM and bit_slice(instruction, 31, 7) == 0:
+                    # ECALL
                     if self.state.current_mode == PrivMode.Machine:
                         raise RVTrap(TrapCause.EnvironmentCallFromMMode)
                     elif self.state.current_mode == PrivMode.Supervisor:
@@ -1152,9 +1147,12 @@ class RISCV:
                     if (funct3 & 0b011) == CSR_RW:
                         self.csr_write(csr, in_value)
                     elif (funct3 & 0b011) == CSR_RS:
-                        self.csr_write(csr, self.csr_read(csr) | in_value)
+                        # Do not perform the write when there is no effect
+                        if in_value != 0:
+                            self.csr_write(csr, self.csr_read(csr) | in_value)
                     elif (funct3 & 0b011) == CSR_RC:
-                        self.csr_write(csr, self.csr_read(csr) & (in_value ^ 0xffffffff))
+                        if in_value != 0:
+                            self.csr_write(csr, self.csr_read(csr) & (in_value ^ 0xffffffff))
                 elif opcode == OPCODE_A_EXT and funct3 == 0b010:
                     funct5 = bit_slice(instruction, 31, 27)
                     word = self.memory_read32(self.state.regs[rs1])
