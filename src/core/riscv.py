@@ -367,7 +367,16 @@ class RISCV:
     console: TextIO
     uart_rx_buffer: List[int]
 
-    def __init__(self, ram_size: int, pc = 0x80000000, console = sys.stdout, elf_path = None, gdb_mode = False, on_breakpoint_hit=None):
+    def __init__(
+            self, ram_size: int,
+            pc = 0x80000000,
+            console = sys.stdout,
+            elf_path = None,
+            gdb_mode = False,
+            on_breakpoint_hit=None,
+            on_call=None,
+            on_return=None
+        ):
         rom_size = 1024 * 1024 # 1MiB
         self.state = RVState(pc)
         self.mem = bytearray([0] * ram_size)
@@ -379,6 +388,8 @@ class RISCV:
         self.gdb_mode = gdb_mode
         self.gdb_breakpoint_hit = False
         self.on_breakpoint_hit = on_breakpoint_hit
+        self.on_call = on_call
+        self.on_return = on_return
 
         self.pretranslated_pc = 0
 
@@ -963,24 +974,34 @@ class RISCV:
                         self.state.regs[rd] = constrain32(self.state.pc + (imm << 12) - 4)
                 elif opcode == OPCODE_JAL:
                     imm = sign_extend32(21,
-                                        (((instruction >> 31) & 1)           << 20) |
-                                        (((instruction >> 12) & 0xff) << 12) |
-                                        (((instruction >> 20) & 1)           << 11) |
+                                        (((instruction >> 31) & 1)     << 20) |
+                                        (((instruction >> 12) & 0xff)  << 12) |
+                                        (((instruction >> 20) & 1)     << 11) |
                                         (((instruction >> 21) & 0x3ff) << 1))
                     rd_value = self.state.pc if rd != 0 else self.state.regs[rd]
                     self.state.pc = constrain32(self.state.pc + imm - 4)
                     self.state.regs[rd] = rd_value
+
+                    if rd == ABIReg.ra:
+                        if self.on_call is not None:
+                            self.on_call(self.state.pc)
                 elif opcode == OPCODE_JALR and funct3 == 0b000:
                     imm = sign_extend32(12, ((instruction >> 20) & 0xfff))
-
                     rd_value = self.state.pc if rd != 0 else self.state.regs[rd]
                     self.state.pc = (self.state.regs[rs1] + imm) & 0xfffffffe
                     self.state.regs[rd] = rd_value
+
+                    if rd == ABIReg.zero and rs1 == ABIReg.ra and imm == 0:
+                        if self.on_return is not None:
+                            self.on_return(self.state.pc)
+                    if rd == ABIReg.ra:
+                        if self.on_call is not None:
+                            self.on_call(self.state.pc)
                 elif opcode == OPCODE_BRANCH:
-                    imm = sign_extend32(13, ((((instruction >> 31) & 1)          << 12) |
-                                            (((instruction >> 7) & 1)            << 11) |
+                    imm = sign_extend32(13, ((((instruction >> 31) & 1)   << 12) |
+                                            (((instruction >> 7) & 1)     << 11) |
                                             (((instruction >> 25) & 0x3f) << 5) |
-                                            (((instruction >> 8) & 0xf)  << 1)
+                                            (((instruction >> 8) & 0xf)   << 1)
                                             ))
 
                     take_branch =                (funct3 == BRANCH_BEQ and self.state.regs[rs1] == self.state.regs[rs2])
