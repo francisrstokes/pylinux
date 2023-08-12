@@ -121,6 +121,9 @@ IE_MEIE             = 11
 IP_MSIP             = 3
 IP_MTIP             = 7
 
+SI_MASK             = 0x333
+SSTATUS_MASK        = 0x800de133
+
 """
 Memory map
 
@@ -282,11 +285,8 @@ class RVState:
     mtimecmp: int
 
     # Supervisor registers
-    sstatus: int
     sscratch: int
     stvec: int
-    sie: int
-    sip: int
     sepc: int
     stval: int
     scause: int
@@ -315,11 +315,8 @@ class RVState:
         self.mcause = 0
         self.medeleg = 0
         self.mideleg = 0
-        self.sstatus = 0
         self.sscratch = 0
         self.stvec = 0
-        self.sie = 0
-        self.sip = 0
         self.sepc = 0
         self.stval = 0
         self.scause = 0
@@ -558,7 +555,7 @@ class RISCV:
 
             # Otherwise this must be a valid entry, check that the current context has permission
             # to access this page
-            sum_bit = ((self.state.sstatus >> 18) & 1)
+            sum_bit = ((self.state.mstatus >> 18) & 1)
             user_bit = ((page_table_entry >> PTE_U) & 1)
 
             has_privilege =                  (self.state.current_mode == PrivMode.Machine)
@@ -720,6 +717,15 @@ class RISCV:
         self.state.pc = constrain32(self.state.pc + 4)
         return instruction
 
+    def csr_sie(self):
+        return self.state.mie & SI_MASK
+
+    def csr_sip(self):
+        return self.state.mip & SI_MASK
+
+    def csr_sstatus(self):
+        return self.state.mstatus & SSTATUS_MASK
+
     def csr_read(self, csr: int):
         permission_bits = ((csr >> 8) & 0x3)
         if permission_bits == 3 and not self.state.current_mode == PrivMode.Machine:
@@ -756,13 +762,13 @@ class RISCV:
         elif csr == 0x105:
             return self.state.stvec
         elif csr == 0x104:
-            return self.state.sie
+            return self.csr_sie()
         elif csr == 0x144:
-            return self.state.sip
+            return self.csr_sip()
         elif csr == 0x141:
             return self.state.sepc
         elif csr == 0x100:
-            return self.state.sstatus
+            return self.csr_sstatus()
         elif csr == 0x142:
             return self.state.scause
         elif csr == 0x143:
@@ -818,13 +824,13 @@ class RISCV:
         elif csr == 0x105:
             self.state.stvec = value
         elif csr == 0x104:
-            self.state.sie = value
+            self.state.mie = value & SI_MASK
         elif csr == 0x144:
-            self.state.sip = value
+            self.state.mip = value & SI_MASK
         elif csr == 0x141:
             self.state.sepc = value
         elif csr == 0x100:
-            self.state.sstatus = value
+            self.state.mstatus = value & SSTATUS_MASK
         elif csr == 0x142:
             self.state.scause = value
         elif csr == 0x143:
@@ -843,10 +849,10 @@ class RISCV:
         delegate_to_supervisor = bool(deleg & (1 << (trap.cause & 0xffff))) and self.state.current_mode != PrivMode.Machine
         effective_mode = PrivMode.Supervisor if delegate_to_supervisor else PrivMode.Machine
 
-        status = self.state.mstatus if effective_mode == PrivMode.Machine else self.state.sstatus
+        status = self.state.mstatus if effective_mode == PrivMode.Machine else self.csr_sstatus()
 
         if is_interrupt:
-            ie = self.state.mie if effective_mode == PrivMode.Machine else self.state.sie
+            ie = self.state.mie if effective_mode == PrivMode.Machine else self.csr_sie()
             mie = ((status >> STATUS_MIE) & 1)
             sie = ((status >> STATUS_SIE) & 1)
             msie = ((ie >> IE_MSIE) & 1)
@@ -896,9 +902,9 @@ class RISCV:
             sie = ((self.state.mstatus >> STATUS_SIE) & 1)
 
             # Clear the bits we need to update in the register
-            self.state.sstatus &= 0xfffffecc
-            self.state.sstatus |= sie << STATUS_SPIE
-            self.state.sstatus |= self.state.current_mode << STATUS_SPP
+            self.state.mstatus &= 0xfffffecc
+            self.state.mstatus |= sie << STATUS_SPIE
+            self.state.mstatus |= self.state.current_mode << STATUS_SPP
 
         self.state.current_mode = effective_mode
         self.state.pc = self.get_trap_offset(effective_mode, trap.cause)
@@ -952,12 +958,12 @@ class RISCV:
                     self.state.current_mode = mpp
                 elif instruction == 0x10200073:
                     # SRET
-                    spp = (self.state.sstatus >> STATUS_SPP)
-                    spie = ((self.state.sstatus >> STATUS_SPIE) & 1)
+                    spp = (self.state.mstatus >> STATUS_SPP)
+                    spie = ((self.state.mstatus >> STATUS_SPIE) & 1)
 
-                    self.state.sstatus &= 0xfffffedd
-                    self.state.sstatus |= spie << STATUS_SIE
-                    self.state.sstatus |= spp << STATUS_SPP
+                    self.state.mstatus &= 0xfffffedd
+                    self.state.mstatus |= spie << STATUS_SIE
+                    self.state.mstatus |= spp << STATUS_SPP
 
                     self.state.pc = self.state.sepc
                     self.state.current_mode = spp
